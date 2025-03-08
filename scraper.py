@@ -8,6 +8,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 import requests
 import re
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 
 # Page object imports
@@ -60,9 +62,9 @@ def process_job_page(driver, job_url):
     job_page = JobPage(driver)
     try:
         client_name = job_page.get_client_name()
-        if client_name:
-            if "-" in client_name:
-                client_name = client_name.split("-")[-1]
+        # if client_name:
+        #     if "-" in client_name:
+        #         client_name = client_name.split("-")[-1]
     except Exception:
         client_name = ""
     try:
@@ -124,23 +126,6 @@ def process_job_page(driver, job_url):
     job_page.go_to_notes_documents()
     time.sleep(5)
     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-    # try:
-    #     driver.execute_script("""
-    #         if (window.angular) {
-    #             var injector = angular.element(document.body).injector();
-    #             var $timeout = injector.get('$timeout');
-    #             $timeout.flush();
-    #         }
-    #     """)
-    # except Exception as e:
-    #     print("Angular flush error:", e)
-
-    # try:
-    #     WebDriverWait(driver, 15).until(
-    #         EC.visibility_of_all_elements_located((By.CSS_SELECTOR, "td.attachment-thumb img"))
-    #     )
-    # except TimeoutException:
-    #     print("No images found in this job's Notes & Documents tab; skipping image download.")
     
     folder_path = os.path.join("output", safe_client, f"#{job_id_lval}_{safe_service}_{safe_date}")
     os.makedirs(folder_path, exist_ok=True)
@@ -156,12 +141,27 @@ def process_job_page(driver, job_url):
         
     parent_xpath = "//tr[@class='message-attachment-list-item ng-scope']"
 
+    # Add explicit waits and scrolling
+    # notes_documents_page = NotesDocumentsPage(driver)
+    
+    # Scroll multiple times to ensure all images are loaded
+    last_height = driver.execute_script("return document.body.scrollHeight")
+    while True:
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)  # Give time for images to load
+        new_height = driver.execute_script("return document.body.scrollHeight")
+        if new_height == last_height:
+            break
+        last_height = new_height
+
+    # Wait for all image elements to be present
     try:
-        parent_elements = WebDriverWait(driver, 15).until(
+        parent_elements = WebDriverWait(driver, 30).until(  # Increased timeout to 30 seconds
             EC.presence_of_all_elements_located((By.XPATH, parent_xpath))
         )
         
-
+        # Keep track of downloaded images to avoid duplicates
+        downloaded_images = set()
         
         for parent_element in parent_elements:
             try:
@@ -172,23 +172,81 @@ def process_job_page(driver, job_url):
                     date_text = "_".join(date_text)
                 print(f"Date: {date_text}")     
                 safe_date_text = sanitize_path_component(date_text)
-                    
-                image_element = parent_element.find_element(By.XPATH, ".//td[@class='attachment-thumb']/img")
-                image_url = image_element.get_attribute("data-geo-image-modal-url")
-                print(f"Image URL: {image_url}")  
                 
+                try:
+                    image_element = parent_element.find_element(By.XPATH, ".//td[@class='attachment-thumb']/img")
+                    image_url = image_element.get_attribute("data-geo-image-modal-url")
+                except:
+                    image_url = None
+                
+                # If no image URL found, try looking for an anchor tag with data-ng-href
+                if not image_url:
+                    try:
+                        anchor_element = parent_element.find_element(By.XPATH, ".//td[@class='attachment-thumb']//a")
+                        image_url = anchor_element.get_attribute("data-ng-href")
+                    except:
+                        continue
+                
+                # Skip if no valid URL found or if we've already downloaded this image
+                if not image_url or image_url in downloaded_images:
+                    continue
+                    
+                print(f"Image/PDF URL: {image_url}")  
                 
                 folder_path_for_images = os.path.join("output", safe_client, f"#{job_id_lval}_{safe_service}_{safe_date}", safe_date_text)
                 os.makedirs(folder_path_for_images, exist_ok=True)          
 
-                # Generate unique filename for each image
-                image_filename = f"image_{int(time.time())}.jpg"
-                image_path = os.path.join(folder_path_for_images, image_filename)
+                # Get file description if available
+                try:
+                    file_desc = parent_element.find_element(By.XPATH, ".//td[@class='attachment-thumb']//div").text
+                    print(f"File description: {file_desc}")
+
+                    # Remove file size information (e.g., "(104 KB)")
+                    file_desc = re.sub(r'\s*\(\d+\s*[KMG]B\)', '', file_desc).strip()
+                    print(f"Sanitized description: {file_desc}")
+
+                    # Extract file extension from URL if possible
+                    file_extension = image_url.split('.')[-1] if '.' in image_url else 'jpg'
+                    
+                    if file_desc:
+                        # Sanitize the filename and keep the extension
+                        safe_file_desc = sanitize_path_component(file_desc)
+                        image_filename = f"{safe_file_desc}"
+                    else:
+                        image_filename = f"file_{int(time.time())}_{len(downloaded_images)}.{file_extension}"
+                    image_path = os.path.join(folder_path_for_images, image_filename)
+                except:
+                    print("No file description found; using default filename")
+                    image_filename = f"file_{int(time.time())}_{len(downloaded_images)}.jpg"   
+                    image_path = os.path.join(folder_path_for_images, image_filename)
+
+                print(f"Downloading image to: {image_path}")
+
+                # # Generate unique filename using timestamp and a counter
+                # image_filename = f"image_{int(time.time())}_{len(downloaded_images)}.jpg"
+                # image_path = os.path.join(folder_path_for_images, image_filename)
                 
-                with open(image_path, "wb") as f:
-                    f.write(requests.get(image_url).content)
+                # Download with retry mechanism
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        response = requests.get(image_url, timeout=30)
+                        response.raise_for_status()
+                        with open(image_path, "wb") as f:
+                            f.write(response.content)
+                        downloaded_images.add(image_url)
+                        break
+                    except (requests.RequestException, IOError) as e:
+                        if attempt == max_retries - 1:
+                            print(f"Failed to download image after {max_retries} attempts: {e}")
+                            continue
+                        time.sleep(2)  # Wait before retrying
+                
             except Exception as e:
                 print(f"Error processing single image in job: {e}")
+                
+        print(f"Successfully downloaded {len(downloaded_images)} images")
+        
     except Exception as e:
         print(f"Error processing job: {e}")
         with open('failed_urls.csv', 'a') as f:
@@ -196,7 +254,7 @@ def process_job_page(driver, job_url):
 
 
 def main():
-    driver = webdriver.Chrome()
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
 
     # ---------------------
     # 1) Login to GeoOp
@@ -236,7 +294,14 @@ def main():
                 f.write(f"{url}\n")
 
     print("✅ Finished scraping jobs!")
-    driver.quit()
+    # Remove or comment out the driver.quit() line
+    driver.quit()  
+
+    # # Add this to keep the script running
+    # try:
+    #     input("Press Enter to close the browser...")
+    # finally:
+    #     driver.quit()
 
 
 
