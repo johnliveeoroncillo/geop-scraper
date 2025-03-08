@@ -245,7 +245,7 @@ def process_job_page(driver, job_url):
             except Exception as e:
                 print(f"Error processing single image in job: {e}")
                 
-        print(f"Successfully downloaded {len(downloaded_images)} images")
+        print(f"Successfully downloaded {len(downloaded_images)} images out of {len(parent_elements)} rows")
         
     except Exception as e:
         print(f"Error processing job: {e}")
