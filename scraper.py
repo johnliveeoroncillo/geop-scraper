@@ -126,8 +126,10 @@ def process_job_page(driver, job_url):
     job_page.go_to_notes_documents()
     time.sleep(5)
     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+
+    parent_path = [job_id_lval, safe_client]
     
-    folder_path = os.path.join("output", safe_client, f"#{job_id_lval}_{safe_service}_{safe_date}")
+    folder_path = os.path.join("output", *parent_path)
     os.makedirs(folder_path, exist_ok=True)
 
     
@@ -139,7 +141,7 @@ def process_job_page(driver, job_url):
         print("No images found in this job's Notes & Documents tab; skipping image download.")
         
         
-    parent_xpath = "//tr[@class='message-attachment-list-item ng-scope']"
+    parent_xpath = "//table[@id='noteTable']//tr[@class='message-attachment-list-item ng-scope']"
 
     # Add explicit waits and scrolling
     # notes_documents_page = NotesDocumentsPage(driver)
@@ -161,7 +163,7 @@ def process_job_page(driver, job_url):
         )
         
         # Keep track of downloaded images to avoid duplicates
-        downloaded_images = set()
+        downloaded_images = []
         
         for parent_element in parent_elements:
             try:
@@ -172,6 +174,8 @@ def process_job_page(driver, job_url):
                     date_text = "_".join(date_text)
                 print(f"Date: {date_text}")     
                 safe_date_text = sanitize_path_component(date_text)
+
+                text = None
                 
                 try:
                     image_element = parent_element.find_element(By.XPATH, ".//td[@class='attachment-thumb']/img")
@@ -185,68 +189,96 @@ def process_job_page(driver, job_url):
                         anchor_element = parent_element.find_element(By.XPATH, ".//td[@class='attachment-thumb']//a")
                         image_url = anchor_element.get_attribute("data-ng-href")
                     except:
-                        continue
+                        image_url = None
+
+                # If no image or pdf consider it as a text file
+                if not image_url:
+                    try:
+                        anchor_element = parent_element.find_element(By.XPATH, ".//td[@class='note-description ng-binding']")
+                        text = anchor_element.text
+                    except:
+                        text = None
+
                 
                 # Skip if no valid URL found or if we've already downloaded this image
-                if not image_url or image_url in downloaded_images:
+                if not image_url and not text or image_url in downloaded_images:
                     continue
                     
                 print(f"Image/PDF URL: {image_url}")  
                 
-                folder_path_for_images = os.path.join("output", safe_client, f"#{job_id_lval}_{safe_service}_{safe_date}", safe_date_text)
-                os.makedirs(folder_path_for_images, exist_ok=True)          
+                if image_url:
+                    print("Image URL found")
+                    folder_path_for_images = os.path.join("output", *parent_path, date_text)
+                    os.makedirs(folder_path_for_images, exist_ok=True)          
 
-                # Get file description if available
-                try:
-                    file_desc = parent_element.find_element(By.XPATH, ".//td[@class='attachment-thumb']//div").text
-                    print(f"File description: {file_desc}")
-
-                    # Remove file size information (e.g., "(104 KB)")
-                    file_desc = re.sub(r'\s*\(\d+\s*[KMG]B\)', '', file_desc).strip()
-                    print(f"Sanitized description: {file_desc}")
-
-                    # Extract file extension from URL if possible
-                    file_extension = image_url.split('.')[-1] if '.' in image_url else 'jpg'
-                    
-                    if file_desc:
-                        # Sanitize the filename and keep the extension
-                        safe_file_desc = sanitize_path_component(file_desc)
-                        image_filename = f"{safe_file_desc}"
-                    else:
-                        image_filename = f"file_{int(time.time())}_{len(downloaded_images)}.{file_extension}"
-                    image_path = os.path.join(folder_path_for_images, image_filename)
-                except:
-                    print("No file description found; using default filename")
-                    image_filename = f"file_{int(time.time())}_{len(downloaded_images)}.jpg"   
-                    image_path = os.path.join(folder_path_for_images, image_filename)
-
-                print(f"Downloading image to: {image_path}")
-
-                # # Generate unique filename using timestamp and a counter
-                # image_filename = f"image_{int(time.time())}_{len(downloaded_images)}.jpg"
-                # image_path = os.path.join(folder_path_for_images, image_filename)
-                
-                # Download with retry mechanism
-                max_retries = 3
-                for attempt in range(max_retries):
+                    # Get file description if available
                     try:
-                        response = requests.get(image_url, timeout=30)
-                        response.raise_for_status()
-                        with open(image_path, "wb") as f:
-                            f.write(response.content)
-                        downloaded_images.add(image_url)
-                        break
-                    except (requests.RequestException, IOError) as e:
-                        if attempt == max_retries - 1:
-                            print(f"Failed to download image after {max_retries} attempts: {e}")
-                            continue
-                        time.sleep(2)  # Wait before retrying
-                
+                        # Get the div with class 'file-description' but exclude the span with file size
+                        file_desc = parent_element.find_element(By.XPATH, ".//div[contains(@class, 'file-description')]").text
+                        # Remove the file size span content using regex
+                        file_desc = re.sub(r'\s*\(\d+\.?\d*\s*[KMG]B\)', '', file_desc).strip()
+                        print(f"File description: {file_desc}")
+
+                        # Clean up the URL to get just the file extension
+                        if '?' in image_url:
+                            base_url = image_url.split('?')[0]
+                            base_url = base_url.split('&')[0]
+                        else:
+                            base_url = image_url
+                            
+                        # Use the cleaned file description as the filename
+                        image_filename = f"{len(downloaded_images)}{file_desc}"
+                        print(f"Image filename: {image_filename}")
+
+                        image_path = os.path.join(folder_path_for_images, image_filename)
+                    except:
+                        print("No file description found; using default filename")
+                        image_filename = f"file_{int(time.time())}_{len(downloaded_images)}.jpg"   
+                        image_path = os.path.join(folder_path_for_images, image_filename)
+
+                    print(f"Downloading image to: {image_path}")
+
+                    # # Generate unique filename using timestamp and a counter
+                    # image_filename = f"image_{int(time.time())}_{len(downloaded_images)}.jpg"
+                    # image_path = os.path.join(folder_path_for_images, image_filename)
+                    
+                    # Download with retry mechanism
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        try:
+                            response = requests.get(image_url, timeout=30)
+                            response.raise_for_status()
+                            with open(image_path, "wb") as f:
+                                f.write(response.content)
+                            downloaded_images.append(image_url)
+                            break
+                        except (requests.RequestException, IOError) as e:
+                            if attempt == max_retries - 1:
+                                print(f"Failed to download image after {max_retries} attempts: {e}")
+                                continue
+                            time.sleep(2)  # Wait before retrying
+                elif text:
+                    print("Text found")
+                    folder_path_for_text = os.path.join("output", *parent_path, date_text)
+                    os.makedirs(folder_path_for_text, exist_ok=True)
+                    text_path = os.path.join(folder_path_for_text, f"{safe_date_text}{len(downloaded_images)}.txt")
+                    with open(text_path, "w") as f:
+                        f.write(text)
+                    downloaded_images.append(text)
             except Exception as e:
                 print(f"Error processing single image in job: {e}")
                 
-        print(f"Successfully downloaded {len(downloaded_images)} images out of {len(parent_elements)} rows")
-        
+        print(f"Successfully downloaded {len(downloaded_images)} files out of {len(parent_elements)} rows")
+
+        return {
+            "downloaded": len(downloaded_images),
+            "total": len(parent_elements),
+            "client_name": client_name,
+            "service_name": service_name,
+            "job_id": job_id_lval,
+            "date": safe_date,
+            "folder_path": folder_path,
+        }
     except Exception as e:
         print(f"Error processing job: {e}")
         with open('failed_urls.csv', 'a') as f:
@@ -286,7 +318,16 @@ def main():
 
     for url in urls:
         try:
-            process_job_page(driver, url)
+            result = process_job_page(driver, url)
+            print(result)
+
+            if (result["downloaded"] == result["total"]):
+                print("✅ All files downloaded successfully!")
+            else:
+                print("❌ Some files failed to download!")
+                raise Exception("Some files failed to download!")
+
+            
             time.sleep(3)
         except Exception as e:
             print(f"Error processing job: {e}")
@@ -294,6 +335,7 @@ def main():
                 f.write(f"{url}\n")
 
     print("✅ Finished scraping jobs!")
+
     # Remove or comment out the driver.quit() line
     driver.quit()  
 
